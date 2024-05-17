@@ -1,0 +1,389 @@
+---
+title: "symportal_merger"
+author: "MNitschke"
+date: "06/02/2023"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(rstatix)
+library(randomcoloR)
+library(ggsci)
+library(tidyverse)
+library(dplyr)
+library(forcats)
+library(reshape2)
+library(stringr)
+library(tidyr)
+library(tibble)
+library(sangerseqR)
+library(DECIPHER)
+library(Biostrings)
+library(phangorn)
+library(ape)
+library(ggplot2)
+library(ggtree)
+library(patchwork)
+library(bioseq)
+library(kmer)
+library(GUniFrac)
+library(seqinr)
+library(vegan)
+library(corrplot)
+library(ggrepel)
+library(ggmsa)
+library(dendextend)
+library(usedist)
+
+read_fasta_df <- function (file = "") {
+  fasta <- readLines(file)
+  ind <- grep(">", fasta)
+  s <- data.frame(ind = ind, from = ind + 1, to = c((ind - 1)[-1], length(fasta)))
+  seqs <- rep(NA, length(ind))
+  for (i in 1:length(ind)) {
+    seqs[i] <- paste(fasta[s$from[i]:s$to[i]], collapse = "")
+  }
+  tib <- tibble(name = gsub(">", "", fasta[ind]), sequence = seqs)
+  return(tib)
+}
+
+write_fasta_df <- function (data, filename) 
+{
+    fastaLines = c()
+    for (rowNum in 1:nrow(data)) {
+        fastaLines = c(fastaLines, as.character(paste(">", 
+            data[rowNum, "label"], sep = "")))
+        fastaLines = c(fastaLines, as.character(data[rowNum, 
+            "sequence"]))
+    }
+    fileConn <- file(filename)
+    writeLines(fastaLines, fileConn)
+    close(fileConn)
+}
+
+dna_to_DNAbin <- function (dna){
+  DNAbin <- as_DNAbin(dna)
+  names(DNAbin) <- names(dna)
+  return(DNAbin)
+}
+dna_to_DNAStringset <- function(x) 
+{
+    bioseq:::check_dna(x)
+    DNAstr <- DNAStringSet(paste(x))
+    names(DNAstr) <- names(x)
+    return(DNAstr)
+}
+
+DNAStringSet_to_dna <- function(x){
+    x_dna <- as_dna(paste(x))
+    names(x_dna) <- names(x)
+    res <- tibble(label = names(x), sequence = x_dna)
+    return(res)
+}
+
+# Convert DNAstringset to DNAbin
+DNAStringSet_to_DNAbin <- function(DNAStringSet){
+  DNAbin <- as.DNAbin(DNAStringSet)
+  return(DNAbin)
+}
+```
+
+```{r}
+rd <- sort(list.files("datasets/", recursive = "false", full.names = TRUE))
+md <- sort(list.files("metadata/", recursive = "false", full.names = TRUE))
+
+rd
+md
+
+merged_data <- data.frame()
+for(i in 1:length(rd)){
+  
+  seq_path <- paste0(rd[i], "/post_med_seqs/")
+  seq_file <- list.files(seq_path, pattern = "seqs.absolute.abund_and_meta.txt", recursive = FALSE, full.names = TRUE)
+  seqs <- read_tsv(seq_file) %>%
+  filter(!(is.na(sample_name)))
+  
+  seqs_long <- seqs %>%
+  dplyr::select(sample_name, sample_type, host_genus,	host_species,	collection_latitude, collection_longitude, collection_date, collection_depth:last_col()) %>% # Select sample_names and the each column contain sequence count data
+  pivot_longer(-sample_name:-collection_depth) %>% # make into long dataframe
+  filter(value > 0) %>% # Remove zero values
+  filter(!(is.na(sample_name)))
+  
+  fasta_file <- list.files(paste0(rd[i], "/post_med_seqs/"), pattern = ".fasta", recursive = FALSE, full.names = TRUE)  
+  fasta <- read_fasta_df(fasta_file)
+  
+  seqs_long <- seqs_long %>% left_join(., fasta)
+
+  merged_data <- rbind(merged_data, seqs_long)
+}
+
+name_update <- merged_data %>%
+  distinct(name, sequence) %>%
+  group_by(sequence) %>%
+  summarise(duplicates = paste0(name, collapse = '-')) %>%
+  separate(duplicates, into = c("A", "B"), sep = "-") %>%
+  mutate(final_name = case_when(is.na(B) ~ A,
+                                !is.na(as.numeric(str_sub(A, 1, 1))) & is.na(B) ~ A,
+                                !is.na(as.numeric(str_sub(A, 1, 1))) ~ B, TRUE ~ A)) %>%
+  select(sequence, final_name)
+
+merged_data_clean <- merged_data %>%
+  left_join(., name_update) %>%
+  select(-name) %>%
+  dplyr::rename(name = final_name)
+```
+
+```{r}
+#Colour for Cladocopium seqs
+seq_names <- merged_data %>% distinct(name) %>% pull(name)
+c_all <- seq_names[str_sub(seq_names, 1, 1) == "C" | str_detect(seq_names, "_C")]
+c_pal <- randomcoloR::randomColor(count = length(c_all))
+names(c_pal) <- c_all
+```
+
+```{r}
+summary <- merged_data %>%
+  filter(str_detect(sample_name, "Ca1|Ca2|Ca3|C1-49")) %>%
+  mutate(culture = case_when(str_detect(sample_name, "Ca1|Ca2|Ca3") ~ "SCF055", TRUE ~ "SCF049")) %>%
+  group_by(culture, sample_name) %>%
+  mutate(value_rel = value/sum(value)) %>%
+  ungroup() %>%
+  group_by(culture, name) %>%
+  get_summary_stats(value_rel)
+
+summary %>%
+  arrange(desc(mean)) %>%
+  mutate(name = as.factor(name)) %>%
+  mutate(name = fct_inorder(name)) %>%
+  ggplot(aes(x = name, y = mean)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ culture, ncol = 2) +
+  theme(aspect.ratio = 1,
+        text = element_text(size = 8))
+
+ggsave("SCF049vs055_DIVs.pdf", width = 10, height = 6, dpi = 300)
+
+```
+
+```{r}
+merged_data %>%
+  mutate(genus = case_when(str_sub(name, start = 1, end = 1) == "C" | str_detect(name, "_C") ~ 'Cladocopium', TRUE ~ "other")) %>%
+  filter(genus == "Cladocopium") %>%
+  filter(str_detect(sample_name, "Ca1|Ca2|Ca3|C1-49")) %>%
+  arrange(desc(value)) %>%
+  mutate(name = as.factor(name)) %>%
+  mutate(name = fct_inorder(name)) %>%
+  ggplot(aes(sample_name, value)) +
+  geom_bar(aes(fill = name, colour = name), stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent) + # # turn on this to change to rel abund
+  scale_color_manual(values = c_pal) + # remove sym others here and below
+  scale_fill_manual(values = c_pal) +
+  theme(legend.position = "bottom", aspect.ratio = 0.25, text = element_text(size=15)) +
+  ylab("Relative abundance (%)")
+
+ggsave("SCF049vs055_profiles.pdf", width = 10, height = 6, dpi = 300)
+```
+```{r}
+reference_data <- read_csv("merged_data.csv")
+
+ref_name_check <- reference_data %>%
+  distinct(name, sequence) %>%
+  group_by(sequence) %>%
+  summarise(duplicates = paste0(name, collapse = '-')) %>%
+  separate(duplicates, into = c("A", "B"), sep = "-") %>%
+  mutate(final_name = case_when(is.na(B) ~ A,
+                                !is.na(as.numeric(str_sub(A, 1, 1))) & is.na(B) ~ A,
+                                !is.na(as.numeric(str_sub(A, 1, 1))) ~ B, TRUE ~ A)) %>%
+  select(sequence, final_name)
+
+reference_data_clean <- reference_data %>%
+  left_join(., ref_name_check) %>%
+  select(-name) %>%
+  dplyr::rename(name = final_name)
+```
+
+```{r}
+q <- c("C1", "C1b", "C1c", "C42.2", "C1bh", "C1br", "C72k")
+qs <- merged_data %>%
+  filter(name %in% q) %>%
+  distinct(name, sequence) %>%
+  pull(sequence)
+```
+
+```{r}
+targets <- reference_data_clean %>%
+  filter(sequence %in% qs)
+
+target_count <- targets %>%
+  mutate(index_name = paste0(index, sample_name)) %>%
+  dplyr::count(index_name) %>% 
+  filter(n > 6) %>%
+  pull(index_name)
+
+reference_subset <- reference_data_clean %>%
+  mutate(index_name = paste0(index, sample_name)) %>%
+  filter(index_name %in% target_count) %>%
+  filter(str_detect(name, "C"))
+
+
+clado_refs <- merged_data_clean %>% 
+  select(sample_name, name, value, sequence) %>% 
+  mutate(host_genus = case_when(str_detect(sample_name, "Ca1|Ca2|Ca3") ~ "SCF055", TRUE ~ "SCF049")) %>% # In hugos study, Ca1-2 are SCF055 samples.
+  filter(str_detect(sample_name, "Ca1|Ca2|Ca3|C1-49"))
+
+all_data <- rbind(clado_refs, reference_subset %>% select(sample_name = index_name, name, value, sequence, host_genus))
+
+q_names <- all_data %>% distinct(name) %>% pull(name)
+q_pal <- randomcoloR::randomColor(count = length(q_names))
+names(q_pal) <- q_names
+
+all_data %>%
+  mutate(host_genus = case_when(host_genus == "acropora" ~ "Acropora", TRUE ~ host_genus)) %>%
+  filter(!str_detect(sample_name, "S8.pdf")) %>% # this is Hugo's study where we put SCF055 into corals
+  arrange(desc(value)) %>%
+  mutate(name = fct_inorder(name)) %>%
+  ggplot(aes(sample_name, value)) +
+  geom_bar(stat = "identity", position = "fill", aes(fill = name)) +
+  facet_wrap(~host_genus, scales = "free_x", ncol = 6) +
+  scale_y_continuous(labels = scales::percent) + # # turn on this to change to rel abund
+  scale_color_manual(values = q_pal) + # remove sym others here and below
+  scale_fill_manual(values = q_pal) +
+  theme(legend.position = "none", aspect.ratio = 1, text = element_text(size=15)) +
+  #theme(axis.text.x = element_text(angle = 90)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 3)) +
+  ylab("Relative abundance (%)")
+
+ggsave("compared_profiles.pdf", width = 10, height = 6, dpi = 300)
+```
+
+```{r}
+fasta_data <- paste0(">", all_data$name, "\n", all_data$sequence)
+
+writeLines(fasta_data, "output.fasta") 
+
+fasta_poci <- read_fasta_df("output.fasta") %>%
+  deframe() %>%
+  as_dna()
+  
+kdist_poci <- fasta_poci %>%
+  dna_to_DNAbin() %>%
+  kdistance(k = 7, residues = "DNA", method = "edgar") %>%
+  as.matrix()
+
+k_tree_poci <- kdist_poci %>% phangorn::upgma()
+
+seqs_wide_poci <- all_data %>%
+  filter(!str_detect(sample_name, "S8.pdf")) %>%
+  dplyr::select(sample_name, name, value) %>%
+  pivot_wider(names_from = name, values_from = value, values_fill = 0) %>%
+  tibble::column_to_rownames(var = "sample_name")
+
+k_unidist_poci <- GUniFrac(seqs_wide_poci, k_tree_poci)   #GUniFrac calculates all the distances 
+k_unidist_poci <- k_unidist_poci$unifracs
+
+du_poci <- k_unidist_poci[, , "d_0.5"]    # GUniFrac with alpha 0.5 
+dist_poci <- as.dist(du_poci, diag = FALSE)
+
+# Cluster the samples
+hclust_samps_poci <- upgma(du_poci)
+
+# Make the sample tree
+tree_poci <- ggtree(hclust_samps_poci, size = 0.2) +
+  geom_tiplab(angle = 270,, size = 0.5)
+  theme(aspect.ratio = 0.3)
+
+# Get a sample order from ggtree
+poci_sample_order <- tree_poci$data %>% filter(isTip == "TRUE") %>%
+  arrange(y) %>%
+  pull(label)
+  
+
+pocimat <- all_data %>% filter(sample_name %in% tree_poci$data$label) %>%
+  select(sample_name, RFLP = host_genus) %>%
+  mutate(RFLP = case_when(RFLP == "acropora" ~ "Acropora", TRUE ~ RFLP)) %>%
+  mutate(sample_name = make.unique(as.character(sample_name))) %>%  
+  tibble::column_to_rownames(var = "sample_name")
+
+poci_tree_mat <- gheatmap(tree_poci, pocimat, colnames = T, width=.1, offset = -0.26)
+poci_tree_mat <- poci_tree_mat + scale_fill_d3(palette = "category20", na.value = "grey90") + layout_dendrogram() + theme(legend.position = "left", legend.key.size = unit(0.5, "lines"))  
+
+rel_data <- all_data %>%
+   group_by(sample_name) %>%
+   mutate(value_rel = value/sum(value)) 
+
+# Start plotting the composition data
+plot_df_poci <- rel_data %>%
+  mutate(sample_name = fct_relevel(sample_name, poci_sample_order))
+
+theme_set(theme_bw())
+
+rel_data <- all_data %>%
+   group_by(sample_name) %>%
+   mutate(value_rel = value/sum(value)) 
+
+# find the likely distinguishing seqs in here
+test_df <- rel_data %>%
+   group_by(name) %>%
+   summarise(mean = mean(value_rel), n = n()) %>%
+   arrange(desc(n), desc(mean))
+
+```
+
+```{r}
+plot_df_poci$sample_name <- factor(plot_df_poci$sample_name, levels = poci_sample_order)
+num_samples_tree <- length(poci_sample_order)
+plot_width <- num_samples_tree * 0.5 
+
+bar_uni_poci <- plot_df_poci %>%
+  filter(!str_detect(sample_name, "S8.pdf")) %>%
+ggplot(aes(sample_name, value_rel)) +
+geom_bar(stat = "identity", aes(fill = name, colour = name)) +
+theme(aspect.ratio = 0.5, legend.position = "none", axis.text.y=element_blank(), axis.ticks.y = element_blank(),
+     axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 1), 
+      axis.ticks.x = element_blank(),
+      axis.title.x = element_blank(), axis.title.y = element_blank(),
+      panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.ticks = element_blank(),) +
+scale_color_manual(values = q_pal) + # remove sym others here and below
+  scale_fill_manual(values = q_pal) +
+#scale_fill_manual(values = all_pal, breaks = levels(profile_data$name)) +
+#scale_colour_manual(values = all_pal, breaks = levels(profile_data$name)) +
+geom_hline(yintercept = 1, linewidth = 1) +
+guides(fill=guide_legend(ncol=2)) +
+  coord_fixed(ratio = 0.1)
+
+bar_uni_poci 
+
+p2 <- poci_tree_mat / bar_uni_poci
+p2
+ggsave("Heatmap_dendrogram_profiles.pdf", plot = p2, device = "pdf")
+
+```
+
+```{r}
+dist_matrix_poci <- as.matrix(dist_poci)
+samples_to_exclude <- c("S4.pdf14NBOb", "S4.pdf27NBOb2","2060.pdfC23", "1907.pdf01-NCITS2")
+seqs_wide_poci_filtered <- seqs_wide_poci[!rownames(seqs_wide_poci) %in% samples_to_exclude, ]
+dist_matrix_filtered <- dist_matrix_poci[!rownames(dist_matrix_poci) %in% samples_to_exclude, ] 
+
+dbRDA_model <- capscale(dist_matrix_filtered ~ ., data = seqs_wide_poci_filtered)
+
+sites <- as.data.frame(scores(dbRDA_model, display = "sites"))
+sites$color <- as.factor(seqs_wide_poci_filtered[,1])
+
+# Plot with ggplot2
+p3 <- ggplot(sites, aes(x = CAP1, y = CAP2, color = color)) +
+  geom_point(size = 3, shape = 21) +
+  geom_text(aes(label = rownames(sites)), size = 3, hjust = 0, vjust = 0) +
+  labs(x = "CAP1", y = "CAP2", color = "Variable") +
+ scale_fill_viridis_c(option = "magma", direction = -1) +
+  theme(aspect.ratio = 1, text = element_text(size = 15)) +
+  theme(legend.position = "none") +
+  theme(plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank())
+ggsave("dbRDA.pdf", plot = p3, device = "pdf", height = 25, width = 40)
+
+
+```
